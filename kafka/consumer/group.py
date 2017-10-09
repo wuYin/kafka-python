@@ -263,7 +263,7 @@ class KafkaConsumer(six.Iterator):
         'partition_assignment_strategy': (RangePartitionAssignor, RoundRobinPartitionAssignor),
         'max_poll_records': 500,
         'max_poll_interval_ms': 300000,
-        'session_timeout_ms': 10000,
+        'session_timeout_ms': 10000, # XXX should be 30000 if < 0.11
         'heartbeat_interval_ms': 3000,
         'receive_buffer_bytes': None,
         'send_buffer_bytes': None,
@@ -294,12 +294,13 @@ class KafkaConsumer(six.Iterator):
 
     def __init__(self, *topics, **configs):
         self.config = copy.copy(self.DEFAULT_CONFIG)
+        configs_copy = copy.copy(configs)
         for key in self.config:
             if key in configs:
-                self.config[key] = configs.pop(key)
+                self.config[key] = configs_copy.pop(key)
 
         # Only check for extra config keys in top-level class
-        assert not configs, 'Unrecognized configs: %s' % configs
+        assert not configs_copy, 'Unrecognized configs: %s' % configs_copy
 
         deprecated = {'smallest': 'earliest', 'largest': 'latest'}
         if self.config['auto_offset_reset'] in deprecated:
@@ -601,16 +602,6 @@ class KafkaConsumer(six.Iterator):
             dict: Map of topic to list of records (may be empty).
         """
         self._coordinator.poll()
-
-        """
-        if self._use_consumer_group():
-            self._coordinator.ensure_coordinator_known()
-            self._coordinator.ensure_active_group()
-
-        # 0.8.2 brokers support kafka-backed offset storage via group coordinator
-        elif self.config['group_id'] is not None and self.config['api_version'] >= (0, 8, 2):
-            self._coordinator.ensure_coordinator_known()
-        """
 
         # Fetch positions if we have partitions we're subscribed to that we
         # don't know the offset for
@@ -1023,12 +1014,12 @@ class KafkaConsumer(six.Iterator):
         while time.time() < self._consumer_timeout:
 
             if self._use_consumer_group():
-                self._coordinator.ensure_coordinator_known()
+                self._coordinator.ensure_coordinator_ready()
                 self._coordinator.ensure_active_group()
 
             # 0.8.2 brokers support kafka-backed offset storage via group coordinator
             elif self.config['group_id'] is not None and self.config['api_version'] >= (0, 8, 2):
-                self._coordinator.ensure_coordinator_known()
+                self._coordinator.ensure_coordinator_ready()
 
             # Fetch offsets for any subscribed partitions that we arent tracking yet
             if not self._subscription.has_all_fetch_positions():
