@@ -41,6 +41,7 @@ log = logging.getLogger('kafka.client')
 
 class KafkaClient(object):
     """
+    # feature: async network I/O, not thread-safe
     A network client for asynchronous request/response network I/O.
 
     This is an internal class used to implement the user-facing producer and
@@ -49,6 +50,7 @@ class KafkaClient(object):
     This class is not thread-safe!
 
     Attributes:
+        # refresh local cluster_metadata while poll()
         cluster (:any:`ClusterMetadata`): Local cache of cluster metadata, retrieved
             via MetadataRequests during :meth:`~kafka.KafkaClient.poll`.
 

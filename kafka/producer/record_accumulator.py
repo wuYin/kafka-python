@@ -16,6 +16,7 @@ from kafka.structs import TopicPartition
 log = logging.getLogger(__name__)
 
 
+# _val protected by _lock, simulate atomic incr/decr operations
 class AtomicInteger(object):
     def __init__(self, val=0):
         self._lock = threading.Lock()

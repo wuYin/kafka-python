@@ -26,7 +26,6 @@ from kafka.structs import TopicPartition
 log = logging.getLogger(__name__)
 PRODUCER_CLIENT_ID_SEQUENCE = AtomicInteger()
 
-
 class KafkaProducer(object):
     """A Kafka client that publishes records to the Kafka cluster.
 
@@ -325,7 +324,11 @@ class KafkaProducer(object):
         Configuration parameters are described in more detail at
         https://kafka.apache.org/0100/configuration.html#producerconfigs
     """
+    #
+    # static default producer config dict
+    #
     DEFAULT_CONFIG = {
+        # basic
         'bootstrap_servers': 'localhost',
         'client_id': None,
         'key_serializer': None,
@@ -333,17 +336,19 @@ class KafkaProducer(object):
         'acks': 1,
         'bootstrap_topics_filter': set(),
         'compression_type': None,
+        # batch
         'retries': 0,
-        'batch_size': 16384,
+        'batch_size': 16384,  # 16KB
         'linger_ms': 0,
         'partitioner': DefaultPartitioner(),
-        'buffer_memory': 33554432,
+        'buffer_memory': 33554432,  # 32MB
+        # timeout
         'connections_max_idle_ms': 9 * 60 * 1000,
-        'max_block_ms': 60000,
-        'max_request_size': 1048576,
-        'metadata_max_age_ms': 300000,
-        'retry_backoff_ms': 100,
-        'request_timeout_ms': 30000,
+        'max_block_ms': 60000,  # 1min
+        'max_request_size': 1048576,  # 1MB
+        'metadata_max_age_ms': 300000,  # 5min
+        'retry_backoff_ms': 100,  # 0.1s
+        'request_timeout_ms': 30000,  # 5min
         'receive_buffer_bytes': None,
         'send_buffer_bytes': None,
         'socket_options': [(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)],
@@ -352,6 +357,7 @@ class KafkaProducer(object):
         'reconnect_backoff_ms': 50,
         'reconnect_backoff_max_ms': 1000,
         'max_in_flight_requests_per_connection': 5,
+        # security
         'security_protocol': 'PLAINTEXT',
         'ssl_context': None,
         'ssl_check_hostname': True,
@@ -388,11 +394,12 @@ class KafkaProducer(object):
         self.config = copy.copy(self.DEFAULT_CONFIG)
         for key in self.config:
             if key in configs:
-                self.config[key] = configs.pop(key)
+                self.config[key] = configs.pop(key)  # overwrite default config by user's argument dict
 
         # Only check for extra config keys in top-level class
-        assert not configs, 'Unrecognized configs: %s' % (configs,)
+        assert not configs, 'Unrecognized configs: %s' % (configs,)  # unrecognized config is not allowed
 
+        # 1. fill default config dynamically
         if self.config['client_id'] is None:
             self.config['client_id'] = 'kafka-python-producer-%s' % \
                                        (PRODUCER_CLIENT_ID_SEQUENCE.increment(),)
@@ -406,7 +413,7 @@ class KafkaProducer(object):
             if deprecated == 'auto':
                 self.config['api_version'] = None
             else:
-                self.config['api_version'] = tuple(map(int, deprecated.split('.')))
+                self.config['api_version'] = tuple(map(int, deprecated.split('.')))  # convert version str to int tuple
             log.warning('use api_version=%s [tuple] -- "%s" as str is deprecated',
                         str(self.config['api_version']), deprecated)
 
@@ -418,6 +425,7 @@ class KafkaProducer(object):
         reporters = [reporter() for reporter in self.config['metric_reporters']]
         self._metrics = Metrics(metric_config, reporters)
 
+        # 2. init kafka client
         client = KafkaClient(metrics=self._metrics, metric_group_prefix='producer',
                              wakeup_timeout_ms=self.config['max_block_ms'],
                              **self.config)
