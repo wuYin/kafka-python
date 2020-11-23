@@ -23,7 +23,6 @@ from kafka.record.legacy_records import LegacyRecordBatchBuilder
 from kafka.serializer import Serializer
 from kafka.structs import TopicPartition
 
-
 log = logging.getLogger(__name__)
 PRODUCER_CLIENT_ID_SEQUENCE = AtomicInteger()
 
@@ -31,14 +30,19 @@ PRODUCER_CLIENT_ID_SEQUENCE = AtomicInteger()
 class KafkaProducer(object):
     """A Kafka client that publishes records to the Kafka cluster.
 
+    # thread-safe, concurrent using is faster.
     The producer is thread safe and sharing a single producer instance across
     threads will generally be faster than having multiple instances.
 
+    # 2 components
+    ## buffer pool: pending records not sent to broker yet.
+    ## I/O thread: wrap records as requests and send to broker.
     The producer consists of a pool of buffer space that holds records that
     haven't yet been transmitted to the server as well as a background I/O
     thread that is responsible for turning these records into requests and
     transmitting them to the cluster.
 
+    # send just append records to pending buffer and return, actually async.
     :meth:`~kafka.KafkaProducer.send` is asynchronous. When called it adds the
     record to a buffer of pending record sends and immediately returns. This
     allows the producer to batch together individual records for efficiency.
@@ -47,6 +51,7 @@ class KafkaProducer(object):
     complete. The "all" setting will result in blocking on the full commit of
     the record, the slowest but most durable setting.
 
+    # retries set 0 means no retry, but retry means message duplication possibly.
     If the request fails, the producer can automatically retry, unless
     'retries' is configured to 0. Enabling retries also opens up the
     possibility of duplicates (see the documentation on message
@@ -54,11 +59,15 @@ class KafkaProducer(object):
     https://kafka.apache.org/documentation.html#semantics
     ).
 
+    # every active partition have a batch buffer, sum of `batch_size` configuration.
     The producer maintains buffers of unsent records for each partition. These
     buffers are of a size specified by the 'batch_size' config. Making this
     larger can result in more batching, but requires more memory (since we will
     generally have one of these buffers for each active partition).
 
+    # linger.ms > 0 instruct producer waiting for more records for filling current batching.
+    # notice: if linger.ms set to 0, records close together in time still will filled to same batch.
+    # cost: increase latency.
     By default a buffer is available to send immediately even if there is
     additional unused space in the buffer. However if you want to reduce the
     number of requests you can set 'linger_ms' to something greater than 0.
@@ -71,6 +80,8 @@ class KafkaProducer(object):
     can lead to fewer, more efficient requests when not under maximal load at
     the cost of a small amount of latency.
 
+    # buffer_memory limit producer's max memory for buffer pending records.
+    # if exhausted send() will block.
     The buffer_memory controls the total amount of memory available to the
     producer for buffering. If records are sent faster than they can be
     transmitted to the server then this buffer space will be exhausted. When
@@ -80,17 +91,20 @@ class KafkaProducer(object):
     value objects the user provides into bytes.
 
     Keyword Arguments:
+        # broker list, one is enough for fetch metadata
         bootstrap_servers: 'host[:port]' string (or list of 'host[:port]'
             strings) that the producer should contact to bootstrap initial
             cluster metadata. This does not have to be the full node list.
             It just needs to have at least one broker that will respond to a
             Metadata API Request. Default port is 9092. If no servers are
             specified, will default to localhost:9092.
+        # producer-name nested into every request
         client_id (str): a name for this client. This string is passed in
             each request to servers and can be used to identify specific
             server-side log entries that correspond to this client.
             Default: 'kafka-python-producer-#' (appended with a unique number
             per instance)
+        # callable(object) -> bytes
         key_serializer (callable): used to convert user-supplied keys to bytes
             If not None, called as f(key), should return bytes. Default: None.
         value_serializer (callable): used to convert user-supplied message
@@ -101,6 +115,8 @@ class KafkaProducer(object):
             This controls the durability of records that are sent. The
             following settings are common:
 
+            # send without any ack
+            # `retries` take no effect because client don't know any failure, offset returned always -1.
             0: Producer will not wait for any acknowledgment from the server.
                 The message will immediately be added to the socket
                 buffer and considered sent. No guarantee can be made that the
@@ -108,11 +124,13 @@ class KafkaProducer(object):
                 configuration will not take effect (as the client won't
                 generally know of any failures). The offset given back for each
                 record will always be set to -1.
+            # bad case: producer <--ack-- leader --X--> followers
             1: Wait for leader to write the record to its local log only.
                 Broker will respond without awaiting full acknowledgement from
                 all followers. In this case should the leader fail immediately
                 after acknowledging the record but before the followers have
                 replicated it then the record will be lost.
+            # waiting leader and all ISR brokers ack, strongest guarantee
             all: Wait for the full set of in-sync replicas to write the record.
                 This guarantees that the record will not be lost as long as at
                 least one in-sync replica remains alive. This is the strongest
@@ -123,6 +141,12 @@ class KafkaProducer(object):
             Compression is of full batches of data, so the efficacy of batching
             will also impact the compression ratio (more batching means better
             compression). Default: None.
+        # if send transmit error or broker error, resent it
+        # tricky: retries > 0, but max_in_flight_requests_per_connection > 1, may cause disorder
+        # batch01 --1.failed--->
+        #                       --2.succeed-->  broker
+        # batch02 --2.succeed-->
+        # broker: [..., batch02, batch01, ...]
         retries (int): Setting a value greater than zero will cause the client
             to resend any record whose send fails with a potentially transient
             error. Note that this retry is no different than if the client
@@ -132,12 +156,14 @@ class KafkaProducer(object):
             are sent to a single partition, and the first fails and is retried
             but the second succeeds, then the records in the second batch may
             appear first.
-            Default: 0.
+            Default: 0. # default no retry
+        # every partition have a batch to reserve un-send records
         batch_size (int): Requests sent to brokers will contain multiple
             batches, one for each partition with data available to be sent.
             A small batch size will make batching less common and may reduce
             throughput (a batch size of zero will disable batching entirely).
-            Default: 16384
+            Default: 16384 # 16KB
+        # default no linger_ms means no delay, linger no effective if batch fulled.
         linger_ms (int): The producer groups together any records that arrive
             in between request transmissions into a single batched request.
             Normally this occurs only under load when records arrive faster
@@ -157,6 +183,7 @@ class KafkaProducer(object):
             would have the effect of reducing the number of requests sent but
             would add up to 5ms of latency to records sent in the absence of
             load. Default: 0.
+        # after key serialization, partition same key to same partition, otherwise randomly
         partitioner (callable): Callable used to determine which partition
             each message is assigned to. Called (after key serialization):
             partitioner(key_bytes, all_partitions, available_partitions).
@@ -165,37 +192,45 @@ class KafkaProducer(object):
             messages with the same key are assigned to the same partition.
             When a key is None, the message is delivered to a random partition
             (filtered to partitions with available leaders only, if possible).
+        # batch --sum--> buffer_memory --fulled--> max_block_ms --waited--> raise TimeoutException
         buffer_memory (int): The total bytes of memory the producer should use
             to buffer records waiting to be sent to the server. If records are
             sent faster than they can be delivered to the server the producer
             will block up to max_block_ms, raising an exception on timeout.
             In the current implementation, this setting is an approximation.
             Default: 33554432 (32MB)
+        # if conn is idle than this, close it directly
         connections_max_idle_ms: Close idle connections after the number of
             milliseconds specified by this config. The broker closes idle
             connections after connections.max.idle.ms, so this avoids hitting
             unexpected socket disconnected errors on the client.
-            Default: 540000
+            Default: 540000 # 9min
+        # limit send(), partitions_for() operation timeout, except user's function like partitioner()
         max_block_ms (int): Number of milliseconds to block during
             :meth:`~kafka.KafkaProducer.send` and
             :meth:`~kafka.KafkaProducer.partitions_for`. These methods can be
             blocked either because the buffer is full or metadata unavailable.
             Blocking in the user-supplied serializers or partitioner will not be
-            counted against this timeout. Default: 60000.
+            counted against this timeout. Default: 60000. # 1min
+        # max size of a record or a request, may different with broker
         max_request_size (int): The maximum size of a request. This is also
             effectively a cap on the maximum record size. Note that the server
             has its own cap on record size which may be different from this.
             This setting will limit the number of record batches the producer
             will send in a single request to avoid sending huge requests.
-            Default: 1048576.
+            Default: 1048576. # 1MB
+        # proactively force refresh local metadata to discovery new broker and new partitions.
         metadata_max_age_ms (int): The period of time in milliseconds after
             which we force a refresh of metadata even if we haven't seen any
             partition leadership changes to proactively discover any new
-            brokers or partitions. Default: 300000
+            brokers or partitions. Default: 300000 # 5min
+        # retry backoff, 0.1s
         retry_backoff_ms (int): Milliseconds to backoff when retrying on
             errors. Default: 100.
+        # network request timeout, 30s
         request_timeout_ms (int): Client request timeout in milliseconds.
             Default: 30000.
+        # os socket settings
         receive_buffer_bytes (int): The size of the TCP receive buffer
             (SO_RCVBUF) to use when reading data. Default: None (relies on
             system defaults). Java client defaults to 32768.
@@ -205,9 +240,12 @@ class KafkaProducer(object):
         socket_options (list): List of tuple-arguments to socket.setsockopt
             to apply to broker connection sockets. Default:
             [(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)]
+        # 0.05s
         reconnect_backoff_ms (int): The amount of time in milliseconds to
             wait before attempting to reconnect to a given host.
             Default: 50.
+        # 1s if repeatedly connect failed
+        # 0.05 -*2-> 0.1 -*2-> 0.2 --..-> exponentially --> 1s --> periodically fixed retry with 20%~120%
         reconnect_backoff_max_ms (int): The maximum amount of time in
             milliseconds to backoff/wait when reconnecting to a broker that has
             repeatedly failed to connect. If provided, the backoff per host
@@ -217,6 +255,8 @@ class KafkaProducer(object):
             rate. To avoid connection storms, a randomization factor of 0.2
             will be applied to the backoff resulting in a random range between
             20% below and 20% above the computed value. Default: 1000.
+        # per broker connection request pipeline max size
+        # default 5, if > 0 if send failed and retried, may dis-ordered
         max_in_flight_requests_per_connection (int): Requests are pipelined
             to kafka brokers up to this number of maximum requests per
             broker connection. Note that if this setting is set to be greater
@@ -424,11 +464,13 @@ class KafkaProducer(object):
     def _cleanup_factory(self):
         """Build a cleanup clojure that doesn't increase our ref count"""
         _self = weakref.proxy(self)
+
         def wrapper():
             try:
                 _self.close(timeout=0)
             except (ReferenceError, AttributeError):
                 pass
+
         return wrapper
 
     def _unregister_cleanup(self):
@@ -590,7 +632,9 @@ class KafkaProducer(object):
             if headers is None:
                 headers = []
             assert type(headers) == list
-            assert all(type(item) == tuple and len(item) == 2 and type(item[0]) == str and type(item[1]) == bytes for item in headers)
+            assert all(
+                type(item) == tuple and len(item) == 2 and type(item[0]) == str and type(item[1]) == bytes for item in
+                headers)
 
             message_size = self._estimate_size_in_bytes(key_bytes, value_bytes, headers)
             self._ensure_valid_record_size(message_size)
